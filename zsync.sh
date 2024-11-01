@@ -4,13 +4,16 @@
 # このスクリプトは FreeBSD の sh、macOS の zsh、および bash との互換性があります。
 
 # グローバル変数
-VERSION="5.3"
+VERSION="5.31"
 
 # シグナルハンドラ関数
 handle_interrupt() {
     print_message "\nInterrupt received. Cleaning up and exiting..."
     exit 1
 }
+
+# シグナルをキャッチする
+trap 'handle_interrupt' INT TERM
 
 # 設定変数
 SOURCE_SSH=""
@@ -99,27 +102,6 @@ get_host_identifier() {
         else
             ssh "$user_host" hostname 2>/dev/null
         fi
-    fi
-}
-
-# ZFS send/receive を実行する関数（更新版）
-execute_zfs_send_receive() {
-    local send_cmd="$1"
-    local receive_cmd="$2"
-    
-    local full_cmd="$send_cmd | $receive_cmd"
-    
-    verbose_message "ZFS send/receive を実行します: $full_cmd"
-    
-    if [ "$DRY_RUN" -eq 0 ]; then
-        eval "$full_cmd"
-        local exit_code=$?
-        if [ $exit_code -ne 0 ]; then
-            print_message "エラー: ZFS 転送が失敗しました。終了コード: $exit_code"
-            return 1
-        fi
-    else
-        print_message "ドライラン: 以下のコマンドを実行します: $full_cmd"
     fi
 }
 
@@ -355,27 +337,6 @@ create_snapshot() {
     else
         print_message "エラー: スナップショットの作成に失敗しました。$result"
         echo ""
-    fi
-}
-
-# ZFS send/receive を実行する関数（シンプル版）
-execute_zfs_send_receive() {
-    local send_cmd="$1"
-    local receive_cmd="$2"
-    
-    local full_cmd="$send_cmd | $receive_cmd"
-    
-    verbose_message "ZFS send/receive を実行します: $full_cmd"
-    
-    if [ "$DRY_RUN" -eq 0 ]; then
-        eval "$full_cmd"
-        local exit_code=$?
-        if [ $exit_code -ne 0 ]; then
-            print_message "エラー: ZFS 転送が失敗しました。終了コード: $exit_code"
-            return 1
-        fi
-    else
-        print_message "ドライラン: 以下のコマンドを実行します: $full_cmd"
     fi
 }
 
