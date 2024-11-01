@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION="2.8"
+VERSION="2.9"
 
 # グローバル変数の初期化
 USE_MBUFFER=0
@@ -59,9 +59,9 @@ convert_legacy_format() {
 
     if echo "$first_arg" | grep -q "@" && [ -n "$second_arg" ] && [ -n "$third_arg" ]; then
         # 旧形式: user@host source_dataset destination_dataset -> 新形式: source_dataset user@host:destination_dataset
-        SOURCE_DATASET="$second_arg"
-        DESTINATION_SSH="$first_arg"
-        DESTINATION_DATASET="$third_arg"
+        SOURCE_DATASET="$2"
+        DESTINATION_SSH="$1"
+        DESTINATION_DATASET="$3"
         IS_REMOTE_DESTINATION=1
         echo "Notice: Legacy format detected, converted to new format."
     else
@@ -263,11 +263,16 @@ get_latest_destination_snapshot() {
 
 # レジュームトークンの取得（受信側から取得）
 get_resume_token() {
+    local resume_token=""
+    local latest_snapshot="$1"
+
     if [ "$IS_REMOTE_DESTINATION" -eq 1 ]; then
-        ssh "$DESTINATION_SSH" "zfs get -H -o value receive_resume_token $DESTINATION_DATASET@$LATEST_SNAPSHOT" 2>/dev/null || true
+        resume_token=$(ssh "$DESTINATION_SSH" "zfs get -H -o value receive_resume_token $DESTINATION_DATASET@$latest_snapshot" 2>/dev/null || true)
     else
-        zfs get -H -o value receive_resume_token "$DESTINATION_DATASET@$LATEST_SNAPSHOT" 2>/dev/null || true
+        resume_token=$(zfs get -H -o value receive_resume_token "$DESTINATION_DATASET@$latest_snapshot" 2>/dev/null || true)
     fi
+
+    echo "$resume_token"
 }
 
 # レジュームトークンを使用した転送の再開
@@ -304,6 +309,15 @@ full_transfer() {
         else
             sudo zfs receive -F "$DESTINATION_DATASET"
         fi
+    else
+        echo "Performing initial full send of $SOURCE_DATASET@$latest_snapshot to destination"
+        sudo zfs send $ZFS_SEND_OPTION "$SOURCE_DATASET@$latest_snapshot" | $MBUFFER_CMD | \
+        if [ "$IS_REMOTE_DESTINATION" -eq 1 ]; then
+            ssh "$DESTINATION_SSH" "$MBUFFER_CMD | sudo zfs receive -F $DESTINATION_DATASET"
+        else
+            sudo zfs receive -F "$DESTINATION_DATASET"
+        fi
+    fi
 }
 
 # インクリメンタル転送
@@ -367,12 +381,11 @@ perform_transfer() {
     if [ -n "$previous_snapshot" ]; then
         # デスティネーションにスナップショットが存在する場合、レジュームトークンを取得
         LATEST_SNAPSHOT=$(echo "$previous_snapshot" | awk -F@ '{print $2}')
-        resume_token=$(get_resume_token)
+        resume_token=$(get_resume_token "$LATEST_SNAPSHOT")
 
         if [ -n "$resume_token" ] && [ "$resume_token" != "-" ]; then
             echo "Found resume_token: $resume_token. Attempting to resume transfer."
             resume_transfer "$resume_token"
-            exit 0
         else
             echo "No valid resume_token found. Performing incremental transfer."
             # 新しいスナップショットを作成
