@@ -4,7 +4,7 @@
 # このスクリプトは FreeBSD の sh、macOS の zsh、および bash との互換性があります。
 
 # グローバル変数
-VERSION="5.36"
+VERSION="5.37"
 SOURCE_SSH=""
 SOURCE_DATASET=""
 DESTINATION_SSH=""
@@ -248,26 +248,21 @@ perform_full_send() {
 # インクリメンタルセンドを実行する関数
 perform_incremental_send() {
     local base_snapshot="$1"
+    local new_snapshot="$2"  # main で作成された新しいスナップショットを受け取る
+    
+    verbose_message "インクリメンタルセンドを実行: $base_snapshot から $new_snapshot へ"
+    
     local base_dataset=$(echo "$base_snapshot" | cut -d'@' -f1)
     local base_snapshot_name=$(echo "$base_snapshot" | cut -d'@' -f2)
 
-    local new_snapshot=$(create_snapshot)
-    if [ -n "$new_snapshot" ]; then
-        verbose_message "新しいスナップショットを作成しました: $new_snapshot"
-        verbose_message "インクリメンタルセンドを実行: $base_snapshot から ${SOURCE_DATASET}@${new_snapshot} へ"
-        
-        local send_cmd="zfs send"
-        if [ "$VERBOSE" -eq 1 ]; then
-            send_cmd="$send_cmd -v"
-        fi
-        send_cmd="$send_cmd -i ${base_dataset}@${base_snapshot_name} ${SOURCE_DATASET}@${new_snapshot}"
-        local receive_cmd="zfs receive -F ${DESTINATION_DATASET}"
-        
-        execute_zfs_send_receive "$send_cmd" "$receive_cmd"
-    else
-        print_message "エラー: 新しいスナップショットの作成に失敗しました。"
-        return 1
+    local send_cmd="zfs send"
+    if [ "$VERBOSE" -eq 1 ]; then
+        send_cmd="$send_cmd -v"
     fi
+    send_cmd="$send_cmd -i ${base_dataset}@${base_snapshot_name} ${SOURCE_DATASET}@${new_snapshot}"
+    local receive_cmd="zfs receive -F ${DESTINATION_DATASET}"
+    
+    execute_zfs_send_receive "$send_cmd" "$receive_cmd"
 }
 
 # 古いスナップショットを削除する関数
@@ -428,30 +423,24 @@ resume_transfer() {
 check_if_diff_exists() {
     local previous_snapshot="$1"
     local current_snapshot="$2"
-return 0
+         return 0
+
     if [ -z "$previous_snapshot" ] || [ -z "$current_snapshot" ]; then
         print_message "エラー: 差分を確認するために両方のスナップショットが必要です。"
         return 1
     fi
 
-    # zfs diff で差分を確認（データセット名の重複を防ぐ）
+    # zfs diff で差分を確認
     local diff_cmd="zfs diff ${SOURCE_DATASET}@${previous_snapshot} ${SOURCE_DATASET}@${current_snapshot}"
     verbose_message "差分を確認するコマンド: $diff_cmd"
 
-    # execute_command_with_error を使用してコマンドを実行
-    if execute_command_with_error "$diff_cmd" ""; then
-        return 0  # 差分が存在する場合
-    else
-        print_message "エラー: zfs diff に失敗しました。"
-        return 1  # 差分がない場合、もしくはエラー
-    fi
+    execute_command_with_error "$diff_cmd" ""
 }
 
 # 差分ファイルを表示する関数
 show_snapshot_diff() {
     local previous_snapshot="$1"
     local current_snapshot="$2"
- return 0
    
     if [ -z "$previous_snapshot" ] || [ -z "$current_snapshot" ]; then
         print_message "エラー: 差分を表示するために両方のスナップショットが必要です。"
@@ -569,10 +558,10 @@ main() {
                         if [ "$SHOW_DIFF_FILES" -eq 1 ]; then
                             show_snapshot_diff "$corresponding_source" "$new_snapshot"
                         fi
-                        perform_incremental_send "$corresponding_source"
+                        perform_incremental_send "$corresponding_source" "$new_snapshot"
                     elif [ "$FORCE_INCREMENTAL" -eq 1 ]; then
                         verbose_message "-j オプションにより、差分がなくてもインクリメンタルセンドを強制実行します。"
-                        perform_incremental_send "$corresponding_source"
+                        perform_incremental_send "$corresponding_source" "$new_snapshot"
                     else
                         verbose_message "差分が見つかりません。インクリメンタルセンドをスキップします。"
                     fi
@@ -589,7 +578,7 @@ main() {
         perfom_cleanup
     fi
         
-    if [ "$DRY_RUN" -eq 1 ]; then
+    if [ "$DRY_RUN" -eq 1 ];then
         print_message "ドライランが完了しました。変更は行われていません。"
     elif [ "$VERBOSE" -eq 1 ]; then
         print_message "ZSync操作が完了しました。"
