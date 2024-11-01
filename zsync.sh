@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION="2.4"
+VERSION="2.5"
 
 # グローバル変数の初期化
 USE_MBUFFER=0
@@ -262,11 +262,11 @@ get_latest_destination_snapshot() {
 }
 
 # 送信側の再開トークンの取得
-get_send_resume_token() {
+get_latest_send_resume_token() {
     if [ "$IS_REMOTE_SOURCE" -eq 1 ]; then
-        ssh "$SOURCE_SSH" "zfs get -H -o value send_resume_token $SOURCE_DATASET@$LATEST_SNAPSHOT" 2>/dev/null || true
+        ssh "$SOURCE_SSH" "zfs list -t snapshot -H -o name,send_resume_token $SOURCE_DATASET" 2>/dev/null | awk '$2 != "-" {print $2 " " $1}' | sort | tail -1 | cut -d' ' -f1
     else
-        zfs get -H -o value send_resume_token "$SOURCE_DATASET@$LATEST_SNAPSHOT" 2>/dev/null || true
+        zfs list -t snapshot -H -o name,send_resume_token "$SOURCE_DATASET" 2>/dev/null | awk '$2 != "-" {print $2 " " $1}' | sort | tail -1 | cut -d' ' -f1
     fi
 }
 
@@ -366,11 +366,10 @@ cleanup_snapshots() {
 
 # 転送処理の実行
 perform_transfer() {
-    local latest_snapshot="$1"
     local send_resume_token
 
-    # 送信側の再開トークンを取得
-    send_resume_token=$(get_send_resume_token)
+    # 送信側の再開トークンを取得（最新のものを取得）
+    send_resume_token=$(get_latest_send_resume_token)
 
     if [ -n "$send_resume_token" ] && [ "$send_resume_token" != "-" ]; then
         echo "Resuming previous transfer."
@@ -386,6 +385,17 @@ perform_transfer() {
             echo "Previous snapshot found. Performing incremental transfer."
             incremental_transfer "$previous_snapshot" "$latest_snapshot"
         fi
+    fi
+}
+
+# 最新の再開トークンを持つスナップショットを取得する関数
+get_latest_send_resume_token() {
+    if [ "$IS_REMOTE_SOURCE" -eq 1 ]; then
+        ssh "$SOURCE_SSH" "zfs list -t snapshot -H -o name,send_resume_token $SOURCE_DATASET" 2>/dev/null | \
+            awk '$2 != "-" {print $2 " " $1}' | sort | tail -1 | cut -d' ' -f1
+    else
+        zfs list -t snapshot -H -o name,send_resume_token "$SOURCE_DATASET" 2>/dev/null | \
+            awk '$2 != "-" {print $2 " " $1}' | sort | tail -1 | cut -d' ' -f1
     fi
 }
 
@@ -407,7 +417,7 @@ main() {
     fi
 
     # 転送処理の実行
-    perform_transfer "$latest_snapshot"
+    perform_transfer
 }
 
 # メイン処理の実行
