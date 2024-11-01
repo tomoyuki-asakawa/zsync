@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION="2.3"
+VERSION="2.4"
 
 # グローバル変数の初期化
 USE_MBUFFER=0
@@ -27,6 +27,18 @@ show_usage() {
     echo "  $0 [-m BUFFER_SIZE] [-R TRANSFER_RATE] [-P PREFIX] [-B] [-s RECORD_SIZE] SOURCE DESTINATION"
     echo "    SOURCE can be: DATASET or user@HOST:DATASET"
     echo "    DESTINATION can be: DATASET, user@HOST:DATASET, or user@HOST"
+}
+
+# データセット名のバリデーションと修正
+sanitize_dataset_name() {
+    local dataset="$1"
+    # 先頭にスラッシュがある場合、削除
+    if echo "$dataset" | grep -q "^/"; then
+        dataset=$(echo "$dataset" | sed 's#^/##')
+        echo "Notice: Removed leading slash from dataset name. New dataset name: $dataset"
+    else
+        echo "$dataset"
+    fi
 }
 
 # ホストがローカルかどうかを判断する
@@ -92,6 +104,10 @@ parse_source_and_destination() {
     else
         DESTINATION_DATASET="$destination_arg"
     fi
+
+    # データセット名のバリデーション
+    SOURCE_DATASET=$(sanitize_dataset_name "$SOURCE_DATASET")
+    DESTINATION_DATASET=$(sanitize_dataset_name "$DESTINATION_DATASET")
 }
 
 # リモートホストの判定を行う
@@ -288,6 +304,15 @@ full_transfer() {
         else
             sudo zfs receive -F "$DESTINATION_DATASET"
         fi
+    else
+        echo "Performing initial full send of $SOURCE_DATASET@$latest_snapshot to destination"
+        sudo zfs send $ZFS_SEND_OPTION "$SOURCE_DATASET@$latest_snapshot" | $MBUFFER_CMD | \
+        if [ "$IS_REMOTE_DESTINATION" -eq 1 ]; then
+            ssh "$DESTINATION_SSH" "$MBUFFER_CMD | sudo zfs receive -F $DESTINATION_DATASET"
+        else
+            sudo zfs receive -F "$DESTINATION_DATASET"
+        fi
+    fi
 }
 
 # インクリメンタル転送
@@ -330,6 +355,12 @@ cleanup_snapshots() {
         ssh "$SOURCE_SSH" "sudo zfs destroy $SOURCE_DATASET@$previous_snapshot" 2>/dev/null || true
     else
         sudo zfs destroy "$SOURCE_DATASET@$previous_snapshot" 2>/dev/null || true
+    fi
+
+    if [ "$IS_REMOTE_DESTINATION" -eq 1 ]; then
+        ssh "$DESTINATION_SSH" "sudo zfs destroy $DESTINATION_DATASET@$previous_snapshot" 2>/dev/null || true
+    else
+        sudo zfs destroy "$DESTINATION_DATASET@$previous_snapshot" 2>/dev/null || true
     fi
 }
 
@@ -376,7 +407,7 @@ main() {
     fi
 
     # 転送処理の実行
-    perform_transfer
+    perform_transfer "$latest_snapshot"
 }
 
 # メイン処理の実行
