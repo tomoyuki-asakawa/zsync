@@ -4,7 +4,7 @@
 # このスクリプトは FreeBSD の sh、macOS の zsh、および bash との互換性があります。
 
 # グローバル変数
-VERSION="5.4"
+VERSION="5.42"
 SOURCE_SSH=""
 SOURCE_DATASET=""
 DESTINATION_SSH=""
@@ -423,27 +423,35 @@ resume_transfer() {
     fi
 }
 
-# 差分ファイルを表示し、差分がなければ false を返す関数
+# 差分を表示し、差分がなければ false を返す関数
 show_snapshot_diff() {
     local previous_snapshot="$1"
     local current_snapshot="$2"
-    
+    local silent="$3"  # サイレントモードかどうかのフラグ
+
     if [ -z "$previous_snapshot" ] || [ -z "$current_snapshot" ]; then
         print_message "エラー: 差分を表示するために両方のスナップショットが必要です。"
         return 1
     fi
     
     local diff_cmd="zfs diff -H ${SOURCE_DATASET}@${previous_snapshot} ${SOURCE_DATASET}@${current_snapshot}"
-    verbose_message "差分を表示するコマンド: $diff_cmd"
     
+    if [ "$silent" -eq 0 ]; then
+        verbose_message "差分を表示するコマンド: $diff_cmd"
+    fi
+
     local diff_output=$(execute_command_with_error "$diff_cmd" "")
     
-    if [ -z "$diff_output" ]; then
-        print_message "差分がありません。転送をスキップします。"
+    if [ -z "$diff_output" ];then
+        if [ "$silent" -eq 0 ]; then
+            print_message "差分がありません。転送をスキップします。"
+        fi
         return 1  # 差分がない場合はエラーコード 1 を返す
     fi
     
-    echo "$diff_output"
+    if [ "$silent" -eq 0 ]; then
+        echo "$diff_output"
+    fi
     return 0  # 差分があった場合は成功を示す
 }
 
@@ -540,12 +548,17 @@ main() {
                 
                 # 新しいスナップショットを一度だけ作成
                 local current_snapshot=$(create_snapshot)
+
+                local previous_snapshot=$(get_latest_snapshot)
                 
+                # -D オプションがある場合は差分を表示し、なければサイレントに実行
                 if [ "$SHOW_DIFF_FILES" -eq 1 ]; then
-                    local previous_snapshot=$(get_latest_snapshot)
-                    
-                    # 差分がない場合はインクリメンタルセンドをスキップ
-                    if ! show_snapshot_diff "$previous_snapshot" "$current_snapshot"; then
+                    if ! show_snapshot_diff "$previous_snapshot" "$current_snapshot" 0; then
+                        verbose_message "差分がないため、インクリメンタルセンドをスキップします。"
+                        return 0
+                    fi
+                else
+                    if ! show_snapshot_diff "$previous_snapshot" "$current_snapshot" 1; then
                         verbose_message "差分がないため、インクリメンタルセンドをスキップします。"
                         return 0
                     fi
