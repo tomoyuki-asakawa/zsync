@@ -1,142 +1,272 @@
 #!/bin/sh
 
+# 互換性情報
+# このスクリプトは FreeBSD の sh、macOS の zsh、および bash との互換性があります。
+
 # グローバル変数
-VERSION="3.1"
-LOG_FILE=""
-CLEANUP_MODE=0
-FULL_INCREMENTAL=0
-SCRIPT_NAME="$0"
-ORIGINAL_ARGS=""
-VERBOSE_MODE=0
-TRANSFER_TYPE=""
-INTERRUPT_OCCURRED=0
+VERSION="5.3"
 
-# シグナルハンドラ
+# シグナルハンドラ関数
 handle_interrupt() {
-    INTERRUPT_OCCURRED=1
-    # 子プロセスにもシグナルを送信
-    kill -INT 0
-}
-
-# verbose_echo 関数の定義
-verbose_echo() {
-    if [ "$VERBOSE_MODE" -eq 1 ]; then
-        echo "$@" >&2
-    fi
-}
-
-# 状態ファイルのパス
-STATE_FILE="/tmp/zsync_state"
-
-# 状態を保存する関数
-save_state() {
-    echo "$1" > "$STATE_FILE"
-}
-
-# 状態を読み込む関数
-load_state() {
-    if [ -f "$STATE_FILE" ]; then
-        cat "$STATE_FILE"
-    else
-        echo ""
-    fi
-}
-
-# ログ記録関数
-log_message() {
-    if [ -n "$LOG_FILE" ]; then
-        echo "$(date): $1" >> "$LOG_FILE"
-    fi
-    verbose_echo "$1"
-}
-
-# エラー報告関数
-report_error() {
-    local ERROR_MESSAGE="$1"
-    local SUGGESTION="$2"
-    log_message "エラー: $ERROR_MESSAGE"
-    echo "エラー: $ERROR_MESSAGE" >&2
-    if [ -n "$SUGGESTION" ]; then
-        echo "$SUGGESTION" >&2
-        echo "以下のコマンドを使用してください：" >&2
-        echo "$SCRIPT_NAME $SUGGESTION $ORIGINAL_ARGS" >&2
-    fi
+    print_message "\nInterrupt received. Cleaning up and exiting..."
     exit 1
 }
 
-# 警告報告関数
-report_warning() {
-    log_message "警告: $1"
-    if [ "$VERBOSE_MODE" -eq 1 ]; then
-        echo "警告: $1" >&2
+# 設定変数
+SOURCE_SSH=""
+SOURCE_DATASET=""
+DESTINATION_SSH=""
+DESTINATION_DATASET=""
+SOURCE_PREFIX=""
+DESTINATION_PREFIX=""
+FULL_INCREMENTAL=0
+VERBOSE=0
+FORCE_SEND=0
+CLEANUP_MODE=0
+SHOW_DIFF_FILES=0
+DRY_RUN=0
+
+# 実行コマンド
+SOURCE_CMD=""
+DESTINATION_CMD=""
+
+# 事前計算された設定
+NEW_SNAPSHOT_NAME=""
+
+# メッセージ出力関数
+print_message() {
+    echo "$1" >&2
+}
+
+# Verboseメッセージ出力関数
+verbose_message() {
+    if [ "$VERBOSE" -eq 1 ]; then
+        echo "$1" >&2
     fi
 }
 
-# 中断メッセージを表示する関数
-display_interrupt_message() {
-    if [ $INTERRUPT_OCCURRED -eq 1 ]; then
-        echo ""
-        case "$TRANSFER_TYPE" in
-            "FULL")
-                log_message "フル送信が中断されました。レジュームトークンが保存されています。"
-                log_message "次回の実行時に中断したところから再開できます。"
-                ;;
-            "INCREMENTAL")
-                log_message "インクリメンタル送信が中断されました。"
-                log_message "次回の実行時に最後に成功したスナップショットから再開されます。"
-                ;;
-            "RESUME")
-                log_message "レジューム転送が中断されました。レジュームトークンが更新されています。"
-                log_message "次回の実行時に中断したところから再開できます。"
-                ;;
-            *)
-                log_message "転送が中断されました。"
-                ;;
+# コマンドを構築する関数（完全更新版）
+build_command() {
+    local user_host="$1"
+    local command="$2"
+    
+    if [ -z "$user_host" ] || [ "$user_host" = "localhost" ]; then
+        # ローカル実行の場合
+        echo "$command"
+    else
+        # リモート実行の場合
+        echo "ssh $user_host $command"
+    fi
+}
+
+# ZFS send/receive を実行する関数
+execute_zfs_send_receive() {
+    local send_cmd="$1"
+    local receive_cmd="$2"
+    
+    local full_cmd="$send_cmd | $receive_cmd"
+    
+    verbose_message "ZFS send/receive を実行します: $full_cmd"
+    
+    if [ "$DRY_RUN" -eq 0 ]; then
+        eval "$full_cmd"
+        local exit_code=$?
+        if [ $exit_code -ne 0 ]; then
+            print_message "エラー: ZFS 転送が失敗しました。終了コード: $exit_code"
+            return 1
+        fi
+    else
+        print_message "ドライラン: 以下のコマンドを実行します: $full_cmd"
+    fi
+}
+
+# ホスト識別子を取得する関数（更新版）
+get_host_identifier() {
+    local user_host="$1"
+    local use_ip="$2"
+    
+    if [ -z "$user_host" ] || [ "$user_host" = "localhost" ]; then
+        # ローカルホストの場合
+        if [ "$use_ip" = "1" ]; then
+            hostname -I | awk '{print $1}'
+        else
+            hostname
+        fi
+    else
+        # リモートホストの場合
+        if [ "$use_ip" = "1" ]; then
+            ssh "$user_host" "hostname -I | awk '{print \$1}'" 2>/dev/null
+        else
+            ssh "$user_host" hostname 2>/dev/null
+        fi
+    fi
+}
+
+# ZFS send/receive を実行する関数（更新版）
+execute_zfs_send_receive() {
+    local send_cmd="$1"
+    local receive_cmd="$2"
+    
+    local full_cmd="$send_cmd | $receive_cmd"
+    
+    verbose_message "ZFS send/receive を実行します: $full_cmd"
+    
+    if [ "$DRY_RUN" -eq 0 ]; then
+        eval "$full_cmd"
+        local exit_code=$?
+        if [ $exit_code -ne 0 ]; then
+            print_message "エラー: ZFS 転送が失敗しました。終了コード: $exit_code"
+            return 1
+        fi
+    else
+        print_message "ドライラン: 以下のコマンドを実行します: $full_cmd"
+    fi
+}
+
+# フルセンドを実行する関数
+perform_full_send() {
+    local new_snapshot=$(create_snapshot "$SOURCE_DATASET" "$SOURCE_CMD")
+    if [ -n "$new_snapshot" ]; then
+        print_message "スナップショットのフルセンドを実行します: $new_snapshot"
+        local send_cmd="$SOURCE_CMD zfs send -v ${SOURCE_DATASET}@${new_snapshot}"
+        local receive_cmd="$DESTINATION_CMD zfs receive -s -F ${DESTINATION_DATASET}"
+        execute_zfs_send_receive "$send_cmd" "$receive_cmd"
+    else
+        print_message "エラー: 新しいスナップショットの作成に失敗しました。"
+        return 1
+    fi
+}
+
+# インクリメンタルセンドを実行する関数
+perform_incremental_send() {
+    local base_snapshot="$1"
+    local new_snapshot=$(create_snapshot "$SOURCE_DATASET" "$SOURCE_CMD")
+    if [ -n "$new_snapshot" ]; then
+        print_message "インクリメンタルセンドを実行します: $base_snapshot から $new_snapshot へ"
+        local send_cmd="$SOURCE_CMD zfs send -v -i ${SOURCE_DATASET}@${base_snapshot} ${SOURCE_DATASET}@${new_snapshot}"
+        local receive_cmd="$DESTINATION_CMD zfs receive -F ${DESTINATION_DATASET}"
+        execute_zfs_send_receive "$send_cmd" "$receive_cmd"
+    else
+        print_message "エラー: 新しいスナップショットの作成に失敗しました。"
+        return 1
+    fi
+}
+
+# デフォルトプレフィックスを生成する関数
+generate_default_prefix() {
+    local source_host=$(get_host_identifier "$SOURCE_SSH" "$USE_IP")
+    local dest_host=$(get_host_identifier "$DESTINATION_SSH" "$USE_IP")
+    local sanitized_source_dataset=$(sanitize_name "$SOURCE_DATASET")
+    local sanitized_dest_dataset=$(sanitize_name "$DESTINATION_DATASET")
+
+    local prefix="zsync"
+
+    # ホスト識別子の追加（ソースとデスティネーションが異なる場合のみ）
+    if [ "$source_host" != "$dest_host" ]; then
+        prefix="${prefix}-${source_host}-${dest_host}"
+    fi
+
+    # データセット名の追加（ソースとデスティネーションのデータセットが異なる場合のみ）
+    if [ "$sanitized_source_dataset" != "$sanitized_dest_dataset" ]; then
+        prefix="${prefix}-${sanitized_source_dataset}-${sanitized_dest_dataset}"
+    fi
+
+    echo "$prefix"
+}
+
+# 引数をパースし、設定を更新する関数（IPアドレスオプション追加）
+parse_arguments() {
+    USE_IP=0
+    while getopts "fs:d:IVvCDni" opt; do
+        case "$opt" in
+            f) FORCE_SEND=1 ;;
+            s) SOURCE_PREFIX="$OPTARG" ;;
+            d) DESTINATION_PREFIX="$OPTARG" ;;
+            I) FULL_INCREMENTAL=1 ;;
+            V) VERBOSE=1 ;;
+            v) show_version ;;
+            C) CLEANUP_MODE=1 ;;
+            D) SHOW_DIFF_FILES=1 ;;
+            n) DRY_RUN=1 ;;
+            i) USE_IP=1 ;;
+            *) usage ;;
         esac
+    done
+    shift $((OPTIND -1))
+
+    if [ $# -ne 2 ]; then
+        usage
     fi
+
+    parse_source_destination "$1" "$2"
 }
 
-# バージョン情報を表示する関数
-show_version() {
-    echo "ZFS Sync Script version $VERSION"
-    exit 0
-}
-
-# 使用方法を表示する関数
-usage() {
-    echo "Usage: $0 [-f] [-s snapshot_name] [-V] [-v] [-C] [-I] [-l log_file] <source_dataset> <target_dataset>"
-    echo "   or: $0 [-f] [-s snapshot_name] [-V] [-v] [-C] [-I] [-l log_file] <user@host> <localdataset> <remotedataset>"
-    echo "Options:"
-    echo "  -f                 Force full send when no common snapshots are found"
-    echo "  -s snapshot_name   Use a fixed snapshot name prefix (timestamp will be appended)"
-    echo "  -V                 Verbose mode: display detailed debug information"
-    echo "  -v                 Show version information and exit"
-    echo "  -C                 Cleanup mode: remove partially received datasets before transfer"
-    echo "  -I                 Full incremental: include all intermediate snapshots in transfer"
-    echo "  -l log_file        Specify a log file to record the operations"
-    echo "Dataset format: [user@host:]dataset"
-    exit 1
-}
-
-# user@host 文字列からホスト名を抽出する関数
-extract_hostname() {
-    echo "$1" | cut -d'@' -f2
-}
-
-# データセット文字列を解析する関数
-parse_dataset() {
-    INPUT="$1"
-    USER_HOST=""
-    DATASET=""
-
-    if echo "$INPUT" | grep -q ":"; then
-        USER_HOST=$(echo "$INPUT" | cut -d':' -f1)
-        DATASET=$(echo "$INPUT" | cut -d':' -f2-)
+# 設定を初期化し、事前計算を行う関数（修正版）
+initialize_config() {
+    parse_arguments "$@"
+    
+    # SSHコマンドの設定
+    if [ -n "$SOURCE_SSH" ]; then
+        SOURCE_CMD="ssh $SOURCE_SSH sudo"
     else
-        DATASET="$INPUT"
+        SOURCE_CMD=""
     fi
 
-    echo "$USER_HOST" "$DATASET"
+    if [ -n "$DESTINATION_SSH" ]; then
+        DESTINATION_CMD="ssh $DESTINATION_SSH sudo"
+    else
+        DESTINATION_CMD=""
+    fi
+
+    # スナップショットプレフィックスの設定
+    if [ -z "$SOURCE_PREFIX" ]; then
+        SOURCE_PREFIX=$(generate_default_prefix)
+    fi
+    SNAPSHOT_PREFIX="$SOURCE_PREFIX"
+
+    # デスティネーションプレフィックスの設定
+    if [ -z "$DESTINATION_PREFIX" ]; then
+        DESTINATION_PREFIX="$SNAPSHOT_PREFIX"
+    fi
+
+    verbose_message "使用するスナップショットプレフィックス: $SNAPSHOT_PREFIX"
+}
+
+# ソースとデスティネーションの情報を解析する関数
+parse_source_destination() {
+    # ソースの解析
+    SOURCE="$1"
+    SOURCE_SSH=$(echo "$SOURCE" | cut -d: -f1)
+    SOURCE_DATASET=$(echo "$SOURCE" | cut -d: -f2)
+    if [ "$SOURCE" = "$SOURCE_DATASET" ]; then
+        SOURCE_SSH=""
+    fi
+
+    # デスティネーションの解析
+    DESTINATION="$2"
+    DESTINATION_SSH=$(echo "$DESTINATION" | cut -d: -f1)
+    DESTINATION_DATASET=$(echo "$DESTINATION" | cut -d: -f2)
+    if [ "$DESTINATION" = "$DESTINATION_DATASET" ]; then
+        DESTINATION_SSH=""
+    fi
+}
+
+# IPアドレスを取得する関数
+get_ip_address() {
+    local host="$1"
+    local ip
+
+    if [ -z "$host" ]; then
+        ip=$(ifconfig | grep -Eo 'inet (addr:)?([0-9]*\.){3}[0-9]*' | grep -Eo '([0-9]*\.){3}[0-9]*' | grep -v '127.0.0.1' | head -n 1)
+    else
+        ip=$(ssh "$host" "ifconfig | grep -Eo 'inet (addr:)?([0-9]*\.){3}[0-9]*' | grep -Eo '([0-9]*\.){3}[0-9]*' | grep -v '127.0.0.1' | head -n 1" 2>/dev/null)
+    fi
+
+    if [ -z "$ip" ]; then
+        echo "$host"
+    else
+        echo "$ip"
+    fi
 }
 
 # 名前をサニタイズする関数
@@ -144,346 +274,269 @@ sanitize_name() {
     echo "$1" | sed 's/[^A-Za-z0-9._-]/_/g'
 }
 
-# IPアドレスを取得する関数
-get_ip_address() {
-    HOST="$1"
-    if [ -z "$HOST" ]; then
-        IP=$(ifconfig | awk '/inet /{print $2}' | grep -v '127.0.0.1' | head -n 1)
-        echo "${IP:-localhost}"
-    else
-        IP=$(ssh "$HOST" "ifconfig | awk '/inet /{print \$2}' | grep -v '127.0.0.1' | head -n 1" 2>/dev/null)
-        if [ -z "$IP" ]; then
-            IP="$HOST"
-        fi
-        echo "$IP"
-    fi
+# スナップショット名を生成する関数（修正版）
+generate_snapshot_name() {
+    local prefix="$1"
+    local timestamp=$(date +%Y%m%d%H%M%S)
+
+    echo "${prefix}-${timestamp}"
 }
 
-# コマンドをローカルまたはリモートで実行する関数
-run_cmd() {
-    USER_HOST="$1"
-    shift
-    CMD="$*"
-    if [ -z "$USER_HOST" ]; then
-        verbose_echo "実行コマンド（ローカル）: $CMD"
-        $CMD
-    else
-        verbose_echo "実行コマンド（リモート）: ssh $USER_HOST 'sudo $CMD'"
-        ssh "$USER_HOST" "sudo $CMD"
-    fi
-}
-
-# スナップショットのリストを取得する関数
-list_snapshots() {
-    USER_HOST="$1"
-    DATASET="$2"
-    run_cmd "$USER_HOST" "zfs list -H -o name -t snapshot -s creation -r $DATASET"
-}
-
-# 共通のスナップショットを取得する関数
-get_common_snapshot() {
-    SOURCE_SNAPSHOTS=$(mktemp -t zsync.XXXXXX)
-    DEST_SNAPSHOTS=$(mktemp -t zsync.XXXXXX)
-
-    verbose_echo "ソースのスナップショットリストを取得します。"
-    list_snapshots "$SOURCE_USER_HOST" "$SOURCE_DATASET" | awk -F'@' '{print $2}' | grep "^${SNAPSHOT_PREFIX}" > "$SOURCE_SNAPSHOTS"
-
-    verbose_echo "デスティネーションのスナップショットリストを取得します。"
-    list_snapshots "$DEST_USER_HOST" "$TARGET_DATASET" | awk -F'@' '{print $2}' | grep "^${SNAPSHOT_PREFIX}" > "$DEST_SNAPSHOTS"
-
-    SORTED_SOURCE_SNAPSHOTS=$(mktemp -t zsync.XXXXXX)
-    SORTED_DEST_SNAPSHOTS=$(mktemp -t zsync.XXXXXX)
-    sort "$SOURCE_SNAPSHOTS" > "$SORTED_SOURCE_SNAPSHOTS"
-    sort "$DEST_SNAPSHOTS" > "$SORTED_DEST_SNAPSHOTS"
-
-    COMMON_SNAPSHOT_NAME=$(comm -12 "$SORTED_SOURCE_SNAPSHOTS" "$SORTED_DEST_SNAPSHOTS" | tail -n 1)
-
-    rm -f "$SOURCE_SNAPSHOTS" "$DEST_SNAPSHOTS" "$SORTED_SOURCE_SNAPSHOTS" "$SORTED_DEST_SNAPSHOTS"
-
-    if [ -n "$COMMON_SNAPSHOT_NAME" ]; then
-        SOURCE_SNAPSHOT_EXISTS=$(run_cmd "$SOURCE_USER_HOST" "zfs list -t snapshot -o name -H ${SOURCE_DATASET}@${COMMON_SNAPSHOT_NAME}" 2>/dev/null)
-        DEST_SNAPSHOT_EXISTS=$(run_cmd "$DEST_USER_HOST" "zfs list -t snapshot -o name -H ${TARGET_DATASET}@${COMMON_SNAPSHOT_NAME}" 2>/dev/null)
-
-        if [ -z "$SOURCE_SNAPSHOT_EXISTS" ] || [ -z "$DEST_SNAPSHOT_EXISTS" ]; then
-            verbose_echo "共通スナップショットが見つかりましたが、存在しません。"
-            COMMON_SNAPSHOT_NAME=""
-        fi
-    fi
-
-    echo "$COMMON_SNAPSHOT_NAME"
-}
-
-# レジュームトークンを取得する関数
+# レジュームトークンを取得する関数（修正版）
 get_resume_token() {
-    USER_HOST="$1"
-    DATASET="$2"
-    TOKEN=$(run_cmd "$USER_HOST" "zfs get -H -o value receive_resume_token $DATASET" 2>/dev/null)
-    echo "$TOKEN"
-}
-
-# レジュームトークンの有効性を確認する関数
-validate_resume_token() {
-    local RESUME_TOKEN="$1"
-    local SOURCE_DATASET="$2"
-    local SOURCE_USER_HOST="$3"
-
-    local TONAME=$(echo "$RESUME_TOKEN" | awk -F'toname = ' '{print $2}' | awk '{print $1}')
-    local SNAPSHOT_EXISTS
-    if [ -z "$SOURCE_USER_HOST" ]; then
-        SNAPSHOT_EXISTS=$(zfs list -t snapshot -o name -H "$TONAME" 2>/dev/null)
-    else
-        SNAPSHOT_EXISTS=$(ssh "$SOURCE_USER_HOST" "zfs list -t snapshot -o name -H $TONAME" 2>/dev/null)
-    fi
-
-    if [ -z "$SNAPSHOT_EXISTS" ]; then
-        verbose_echo "レジュームトークンが参照するスナップショット $TONAME が存在しません。"
-        return 1
-    fi
-
-    return 0
-}
-
-# スナップショットを準備する関数
-prepare_snapshots() {
-    local TIMESTAMP=$(date +%Y%m%d%H%M%S)
-
-    if [ -n "$FIXED_SNAPSHOT_NAME" ]; then
-        SNAPSHOT_NAME=$(echo "${FIXED_SNAPSHOT_NAME}" | sed 's/-*$//g')"-${TIMESTAMP}"
-    else
-        local SOURCE_IDENTIFIER
-        local DEST_IDENTIFIER
-
-        if [ "$USE_OLD_FORMAT" = "true" ]; then
-            SOURCE_IDENTIFIER=$(extract_hostname "$DEST_USER_HOST")
-            DEST_IDENTIFIER=$SOURCE_IDENTIFIER
-        else
-            SOURCE_IP=$(get_ip_address "${SOURCE_USER_HOST}")
-            DEST_IP=$(get_ip_address "${DEST_USER_HOST}")
-            SOURCE_IDENTIFIER=$(sanitize_name "${SOURCE_IP:-localhost}")
-            DEST_IDENTIFIER=$(sanitize_name "${DEST_IP:-localhost}")
-        fi
-
-        SANITIZED_TARGET_DATASET=$(sanitize_name "${TARGET_DATASET}")
-
-        SNAPSHOT_NAME="${SNAPSHOT_PREFIX}-${SOURCE_IDENTIFIER}-${DEST_IDENTIFIER}-${SANITIZED_TARGET_DATASET}-${TIMESTAMP}"
-    fi
-
-    SNAPSHOT_NAME=$(echo "$SNAPSHOT_NAME" | sed 's/-\+/-/g')
-    FULL_SNAPSHOT_NAME="${SOURCE_DATASET}@${SNAPSHOT_NAME}"
-
-    verbose_echo "ソースデータセットの存在を確認します。"
-    DATASET_EXISTS=$(run_cmd "$SOURCE_USER_HOST" "zfs list -H -o name $SOURCE_DATASET" 2>/dev/null)
-
-    if [ -z "$DATASET_EXISTS" ]; then
-        report_error "ソースデータセット $SOURCE_DATASET が存在しません。"
-    fi
-
-    verbose_echo "ソースデータセットで新しいスナップショットを作成します。"
-    verbose_echo "スナップショット名: $SNAPSHOT_NAME"
-    run_cmd "$SOURCE_USER_HOST" "zfs snapshot $FULL_SNAPSHOT_NAME"
-}
-
-# 部分的に受信されたデータセットを処理する関数
-handle_partial_recv() {
-    local DATASET="$1"
-    local USER_HOST="$2"
+    local dataset="$1"
+    local cmd="$2"
     
-    RECV_DATASET="${DATASET}/%recv"
-    RECV_EXISTS=$(run_cmd "$USER_HOST" "zfs list -H -o name $RECV_DATASET 2>/dev/null")
+    local result
+    local error
     
-    if [ -n "$RECV_EXISTS" ]; then
-        log_message "部分的に受信されたデータセット ${RECV_DATASET} を削除します。"
-        run_cmd "$USER_HOST" "zfs destroy -R $RECV_DATASET"
-        if [ $? -eq 0 ]; then
-            log_message "部分的に受信されたデータセットの削除に成功しました。"
-            return 0
-        else
-            log_message "部分的に受信されたデータセットの削除に失敗しました。"
+    verbose_message "デスティネーションデータセットのレジュームトークンを確認しています: $dataset"
+    result=$(execute_command_with_error "$cmd" zfs get -H -o value receive_resume_token "$dataset")
+    local exit_code=$?
+    
+    if [ $exit_code -ne 0 ]; then
+        error=$(echo "$result" | grep "Error:")
+        verbose_message "レジュームトークンの取得エラー: $error"
+        verbose_message "データセットが存在しないか、他のエラーが発生しました。終了コード: $exit_code"
+        echo ""
+    elif [ -z "$result" ] || [ "$result" = "-" ]; then
+        verbose_message "有効なレジュームトークンが見つかりません。"
+        echo ""
+    else
+        verbose_message "レジュームトークン: $result"
+        echo "$result"
+    fi
+}
+
+# 最新のスナップショットを取得する関数（修正版）
+get_latest_snapshot() {
+    local dataset="$1"
+    local cmd_prefix="$2"
+    local prefix="$3"
+    
+    local cmd="zfs list -t snapshot -H -o name | grep \"$dataset@$prefix\" | sort -n | tail -1"
+    local result=$(execute_command "$cmd" "$cmd_prefix")
+    
+    if [ -z "$result" ]; then
+        verbose_message "プレフィックス $prefix に一致するスナップショットが見つかりません: $dataset"
+        echo ""
+    else
+        echo "$result" | awk -F'@' '{print $2}'
+    fi
+}
+
+# 対応するソーススナップショットを見つける関数（修正版）
+find_corresponding_source_snapshot() {
+    local dest_snapshot="$1"
+    local cmd="zfs list -t snapshot -H -o name | grep \"$SOURCE_DATASET@$dest_snapshot\""
+    local result=$(execute_command "$cmd" "$SOURCE_CMD")
+    
+    if [ -z "$result" ]; then
+        verbose_message "対応するソーススナップショットが見つかりません: $dest_snapshot"
+        echo ""
+    else
+        echo "$dest_snapshot"
+    fi
+}
+
+# 新しいスナップショットを作成する関数（修正版）
+create_snapshot() {
+    local dataset="$1"
+    local cmd="$2"
+    local snapshot_name=$(generate_snapshot_name "$SNAPSHOT_PREFIX")
+    
+    verbose_message "新しいスナップショットを作成します: ${dataset}@${snapshot_name}"
+    local result=$(execute_command_with_error "$cmd" zfs snapshot "${dataset}@${snapshot_name}")
+    local exit_code=$?
+    
+    if [ $exit_code -eq 0 ]; then
+        verbose_message "スナップショットを作成しました: ${dataset}@${snapshot_name}"
+        echo "$snapshot_name"
+    else
+        print_message "エラー: スナップショットの作成に失敗しました。$result"
+        echo ""
+    fi
+}
+
+# ZFS send/receive を実行する関数（シンプル版）
+execute_zfs_send_receive() {
+    local send_cmd="$1"
+    local receive_cmd="$2"
+    
+    local full_cmd="$send_cmd | $receive_cmd"
+    
+    verbose_message "ZFS send/receive を実行します: $full_cmd"
+    
+    if [ "$DRY_RUN" -eq 0 ]; then
+        eval "$full_cmd"
+        local exit_code=$?
+        if [ $exit_code -ne 0 ]; then
+            print_message "エラー: ZFS 転送が失敗しました。終了コード: $exit_code"
             return 1
         fi
     else
-        log_message "部分的に受信されたデータセットは見つかりませんでした。"
-        return 0
+        print_message "ドライラン: 以下のコマンドを実行します: $full_cmd"
     fi
 }
 
-# データセットを送信するコマンドを構築する関数
-build_send_command() {
-    log_message "レジュームトークンを確認します。"
-    RESUME_TOKEN=$(get_resume_token "$DEST_USER_HOST" "$TARGET_DATASET")
-    log_message "取得されたレジュームトークン: $RESUME_TOKEN"
+# プロセススナップショット関数（レジューム無しバージョン）
+process_snapshots_without_resume() {
+    local dest_latest=$(get_latest_snapshot "$DESTINATION_DATASET" "$DESTINATION_CMD" "$DESTINATION_PREFIX")
 
-    if [ "$RESUME_TOKEN" != "-" ] && [ -n "$RESUME_TOKEN" ]; then
-        log_message "レジュームトークンが見つかりました。転送を再開します。"
-        SEND_CMD="zfs send -v -t $RESUME_TOKEN"
-        TRANSFER_TYPE="RESUME"
+    if [ -z "$dest_latest" ]; then
+        print_message "デスティネーションに既存のスナップショットがありません。フルセンドを実行します。"
+        perform_full_send
     else
-        log_message "レジュームトークンが見つかりません。部分的に受信されたデータセットをチェックします。"
-        handle_partial_recv "$TARGET_DATASET" "$DEST_USER_HOST"
-        
-        log_message "共通のスナップショットを確認します。"
-        COMMON_SNAPSHOT_NAME=$(get_common_snapshot)
-        log_message "共通のスナップショット名: $COMMON_SNAPSHOT_NAME"
-        if [ -z "$COMMON_SNAPSHOT_NAME" ] || [ "$FORCE_SEND" -eq 1 ]; then
-            log_message "フル送信を行います。"
-            prepare_snapshots
-            SEND_CMD="zfs send -v $FULL_SNAPSHOT_NAME"
-            TRANSFER_TYPE="FULL"
+        local corresponding_source=$(find_corresponding_source_snapshot "$dest_latest")
+        if [ -z "$corresponding_source" ]; then
+            print_message "対応するソーススナップショットが見つかりません。フルセンドを実行します。"
+            perform_full_send
         else
-            log_message "インクリメンタル送信を行います。"
-            prepare_snapshots
-            PREVIOUS_SNAPSHOT_NAME="$COMMON_SNAPSHOT_NAME"
-            if [ "$FULL_INCREMENTAL" -eq 1 ]; then
-                SEND_CMD="zfs send -v -I ${SOURCE_DATASET}@${COMMON_SNAPSHOT_NAME} ${FULL_SNAPSHOT_NAME}"
-            else
-                SEND_CMD="zfs send -v -i ${SOURCE_DATASET}@${COMMON_SNAPSHOT_NAME} ${FULL_SNAPSHOT_NAME}"
-            fi
-            TRANSFER_TYPE="INCREMENTAL"
+            print_message "対応するソーススナップショットが見つかりました。インクリメンタルセンドを実行します。"
+            perform_incremental_send "$corresponding_source"
         fi
     fi
-
-    if [ -z "$SEND_CMD" ]; then
-        report_error "送信コマンドが構築できませんでした。"
-    fi
 }
 
-# データセットを受信するコマンドを構築する関数
-build_receive_command() {
-    RECEIVE_CMD="zfs receive -s -F $TARGET_DATASET"
-}
-
-# データ転送を実行する関数
-execute_transfer() {
-    log_message "送信コマンド: $SEND_CMD"
-    log_message "受信コマンド: $RECEIVE_CMD"
-    log_message "転送タイプ: $TRANSFER_TYPE"
-
-    if [ "$TRANSFER_TYPE" = "RESUME" ]; then
-        log_message "レジューム送信を実行中です。フル送信のように表示されますが、実際には中断した場所から再開しています。"
-    fi
-
-    # コマンドの生成
-    SEND_CMD_FULL="$SEND_CMD"
-    RECEIVE_CMD_FULL="$RECEIVE_CMD"
-
-    # 送信コマンドがリモートの場合
-    if [ -n "$SOURCE_USER_HOST" ]; then
-        SEND_CMD_FULL="ssh $SOURCE_USER_HOST 'sudo $SEND_CMD'"
-    fi
-
-    # 受信コマンドがリモートの場合
-    if [ -n "$DEST_USER_HOST" ]; then
-        RECEIVE_CMD_FULL="ssh $DEST_USER_HOST 'sudo $RECEIVE_CMD'"
-    fi
-
-    # 実行コマンドの表示
-    log_message "実行コマンド: $SEND_CMD_FULL | $RECEIVE_CMD_FULL"
-
-    # データ転送の実行
-    eval "$SEND_CMD_FULL | $RECEIVE_CMD_FULL"
-
-    TRANSFER_RESULT=$?
-
-    if [ $TRANSFER_RESULT -ne 0 ]; then
-        report_error "データ転送中にエラーが発生しました。"
+# プロセススナップショット関数（修正版）
+process_snapshots() {
+    local resume_token=$(get_resume_token "$DESTINATION_DATASET" "$DESTINATION_CMD")
+    
+    if [ -n "$resume_token" ]; then
+        print_message "レジュームトークンを使用して転送を再開します。"
+        resume_transfer "$resume_token"
     else
-        log_message "データ転送が正常に完了しました。"
-    fi
-}
-
-# 古いスナップショットを削除する関数
-cleanup_snapshots() {
-    if [ -n "$PREVIOUS_SNAPSHOT_NAME" ]; then
-        verbose_echo "インクリメンタル送信が完了しました。古いスナップショットを削除します。"
-
-        verbose_echo "ソースの古いスナップショットを削除します: ${SOURCE_DATASET}@${PREVIOUS_SNAPSHOT_NAME}"
-        run_cmd "$SOURCE_USER_HOST" "zfs destroy ${SOURCE_DATASET}@${PREVIOUS_SNAPSHOT_NAME}"
-
-        verbose_echo "ターゲットの古いスナップショットを削除します: ${TARGET_DATASET}@${PREVIOUS_SNAPSHOT_NAME}"
-        run_cmd "$DEST_USER_HOST" "zfs destroy ${TARGET_DATASET}@${PREVIOUS_SNAPSHOT_NAME}" || verbose_echo "警告: リモートのスナップショット削除に失敗しました。手動での確認が必要です。"
-    fi
-}
-
-# 引数の解析
-parse_arguments_and_setup() {
-    FORCE_SEND=0
-    SNAPSHOT_PREFIX="zsync"
-    FIXED_SNAPSHOT_NAME=""
-    VERBOSE_MODE=0
-    CLEANUP_MODE=0
-    FULL_INCREMENTAL=0
-
-    # オリジナルの引数を保存
-    ORIGINAL_ARGS="$@"
-
-    while getopts "fs:VvCIl:" opt; do
-        case "$opt" in
-            f) FORCE_SEND=1 ;;
-            s) FIXED_SNAPSHOT_NAME="$OPTARG" ;;
-            V) VERBOSE_MODE=1 ;;
-            v) show_version ;;
-            C) CLEANUP_MODE=1 ;;
-            I) FULL_INCREMENTAL=1 ;;
-            l) LOG_FILE="$OPTARG" ;;
-            *) usage ;;
-        esac
-    done
-    shift $((OPTIND -1))
-
-    # オプションを取り除いた引数を ORIGINAL_ARGS に設定
-    ORIGINAL_ARGS="$@"
-
-    # 引数の数に基づいてパラメータ形式を判断
-    if [ $# -eq 3 ]; then
-        verbose_echo "旧形式のパラメータが検出されました。"
-        USE_OLD_FORMAT="true"
-        REMOTE_USER_HOST="$1"
-        SOURCE_DATASET="$2"
-        TARGET_DATASET="$3"
-        SOURCE_USER_HOST=""
-        DEST_USER_HOST="$REMOTE_USER_HOST"
+        verbose_message "デスティネーションデータセットの最新スナップショットを確認しています: $DESTINATION_DATASET"
+        local dest_latest=$(get_latest_snapshot "$DESTINATION_DATASET" "$DESTINATION_CMD" "$DESTINATION_PREFIX")
         
-        if [ -z "$FIXED_SNAPSHOT_NAME" ]; then
-            REMOTE_HOSTNAME=$(extract_hostname "$REMOTE_USER_HOST")
-            FIXED_SNAPSHOT_NAME="${SNAPSHOT_PREFIX}-${REMOTE_HOSTNAME}"
+        if [ -z "$dest_latest" ]; then
+            print_message "デスティネーションに既存のスナップショットがありません。フルセンドを実行します。"
+            perform_full_send
+        else
+            print_message "デスティネーションの最新スナップショット: $dest_latest"
+            local corresponding_source=$(find_corresponding_source_snapshot "$dest_latest")
+            if [ -z "$corresponding_source" ]; then
+                print_message "対応するソーススナップショットが見つかりません: $dest_latest"
+                print_message "フルセンドを実行します。"
+                perform_full_send
+            else
+                print_message "対応するソーススナップショットが見つかりました: $corresponding_source"
+                print_message "インクリメンタルセンドを実行します。"
+                perform_incremental_send "$corresponding_source"
+            fi
         fi
-    elif [ $# -eq 2 ]; then
-        verbose_echo "新形式のパラメータが検出されました。"
-        SOURCE_PARSED=$(parse_dataset "$1")
-        SOURCE_USER_HOST=$(echo "$SOURCE_PARSED" | cut -d' ' -f1)
-        SOURCE_DATASET=$(echo "$SOURCE_PARSED" | cut -d' ' -f2)
-
-        TARGET_PARSED=$(parse_dataset "$2")
-        DEST_USER_HOST=$(echo "$TARGET_PARSED" | cut -d' ' -f1)
-        TARGET_DATASET=$(echo "$TARGET_PARSED" | cut -d' ' -f2)
-    else
-        usage
-    fi
-
-    verbose_echo "Source User@Host: $SOURCE_USER_HOST"
-    verbose_echo "Source Dataset: $SOURCE_DATASET"
-    verbose_echo "Dest User@Host: $DEST_USER_HOST"
-    verbose_echo "Target Dataset: $TARGET_DATASET"
-    verbose_echo "Snapshot Prefix: $FIXED_SNAPSHOT_NAME"
-
-    if [ "$CLEANUP_MODE" -eq 1 ]; then
-        verbose_echo "クリーンアップモードが有効です。部分的に受信されたデータセットを確認します。"
-        handle_partial_recv "$TARGET_DATASET" "$DEST_USER_HOST"
     fi
 }
 
-# メイン処理
-main() {
-    parse_arguments_and_setup "$@"
-    build_send_command
-    build_receive_command
-    execute_transfer
-    if [ $? -eq 0 ]; then
-        cleanup_snapshots
-        log_message "同期処理が正常に完了しました。"
+# コマンドを実行し、結果とエラーコードを返す関数（変更なし）
+execute_command_with_error() {
+    local cmd_prefix="$1"
+    shift
+    local full_cmd="$cmd_prefix $*"
+    
+    verbose_message "実行するコマンド: $full_cmd"
+    
+    local output
+    local exit_code
+    
+    if [ -n "$cmd_prefix" ]; then
+        output=$($cmd_prefix "$@" 2>&1)
+        exit_code=$?
+    else
+        output=$("$@" 2>&1)
+        exit_code=$?
     fi
+    
+    echo "$output"
+    return $exit_code
+}
+
+# レジュームトークンを使用して転送を再開する関数（エラー処理改善版）
+resume_transfer() {
+    local resume_token="$1"
+    if [ -n "$resume_token" ]; then
+        local send_cmd="$SOURCE_CMD zfs send -v -t $resume_token"
+        local receive_cmd="$DESTINATION_CMD zfs receive -s $DESTINATION_DATASET"
+        if ! execute_zfs_send_receive "$send_cmd" "$receive_cmd"; then
+            print_message "エラー: レジュームトークンを使用した転送に失敗しました。"
+            return 1
+        fi
+        return 0
+    else
+        print_message "エラー: 無効なレジュームトークンです。"
+        return 1
+    fi
+}
+
+# コマンドを実行する関数（修正版）
+execute_command() {
+    local cmd="$1"
+    local prefix="$2"
+    
+    if [ -n "$prefix" ]; then
+        eval "$prefix $cmd"
+    else
+        eval "$cmd"
+    fi
+}
+
+# エラー報告関数
+report_error() {
+    print_message "エラー: $1"
+    exit 1
+}
+
+# 初期情報を表示する関数
+display_initial_info() {
+    print_message "ソース: ${SOURCE_SSH:+$SOURCE_SSH:}$SOURCE_DATASET"
+    print_message "デスティネーション: ${DESTINATION_SSH:+$DESTINATION_SSH:}$DESTINATION_DATASET"
+    print_message "ソーススナップショットプレフィックス: $SOURCE_PREFIX"
+    print_message "デスティネーションスナップショットプレフィックス: $DESTINATION_PREFIX"
+}
+
+# メイン処理関数
+main() {
+    initialize_config "$@"
+    display_initial_info
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        print_message "ドライランモード: 実際の変更は行われません。"
+    fi
+
+    process_snapshots
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        print_message "ドライランが完了しました。変更は行われていません。"
+    else
+        print_message "ZSync操作が完了しました。"
+    fi
+}
+
+# 使用方法を表示する関数
+usage() {
+    echo "使用方法: $0 [オプション] source_user@source_host:source_dataset destination_user@destination_host:destination_dataset" >&2
+    echo "オプション:" >&2
+    echo "  -f                フルセンドを強制する" >&2
+    echo "  -s snapshot_prefix ソーススナップショットプレフィックスを設定（デフォルト: 自動生成）" >&2
+    echo "  -d snapshot_prefix デスティネーションスナップショットプレフィックスを設定（デフォルト: ソースと同じ）" >&2
+    echo "  -I                フルインクリメンタルセンドを実行する" >&2
+    echo "  -V                Verboseモードを有効にする" >&2
+    echo "  -v                バージョン情報を表示する" >&2
+    echo "  -C                クリーンアップモードを有効にする" >&2
+    echo "  -D                差分ファイルを表示する" >&2
+    echo "  -n                ドライラン（実際の変更は行わない）" >&2
+    echo "  -i                IPアドレスを使用する（デフォルト: ホスト名）" >&2
+    echo "" >&2
+    echo "このスクリプトは FreeBSD sh、macOS zsh、bash と互換性があります。" >&2
+    exit 1
+}
+
+# バージョン情報を表示する関数
+show_version() {
+    echo "ZSync スクリプトバージョン $VERSION" >&2
+    echo "FreeBSD sh、macOS zsh、bash と互換性があります。" >&2
+    exit 0
 }
 
 # スクリプトの実行
 main "$@"
-
