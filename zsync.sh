@@ -4,7 +4,7 @@
 # このスクリプトは FreeBSD の sh、macOS の zsh、および bash との互換性があります。
 
 # グローバル変数
-VERSION="5.45"
+VERSION="5.46"
 SOURCE_SSH=""
 SOURCE_DATASET=""
 DESTINATION_SSH=""
@@ -271,15 +271,39 @@ perform_incremental_send() {
     execute_zfs_send_receive "$send_cmd" "$receive_cmd"
 }
 
-# 古いスナップショットを削除する関数
+# スナップショットのリストを取得する関数を修正
+get_snapshots_list() {
+    local dataset="$1"
+    local prefix="$2"
+    local cmd="zfs list -t snapshot -H -o name -s creation | grep '${dataset}@${prefix}' | sort"
+    
+    verbose_message "スナップショットリスト取得コマンド: $cmd"
+    
+    if [ -n "$SOURCE_CMD" ] && [ "$3" = "source" ]; then
+        execute_command_with_error "$cmd" ""
+    elif [ -n "$DESTINATION_CMD" ] && [ "$3" = "destination" ]; then
+        execute_command_with_error "" "$cmd"
+    else
+        print_message "エラー: 不明なコマンドタイプです"
+        return 1
+    fi
+}
+
+# cleanup_old_snapshots 関数を修正
 cleanup_old_snapshots() {
     local dataset="$1"
     local prefix="$2"
-    local cmd_prefix="$3"
+    local type="$3"  # "source" または "destination"
     
     verbose_message "古いスナップショットの削除を開始: データセット=$dataset, プレフィックス=$prefix"
     
-    local snapshots_list=$(get_snapshots_list "$dataset" "$prefix" "$cmd_prefix")
+    local snapshots_list
+    snapshots_list=$(get_snapshots_list "$dataset" "$prefix" "$type")
+    if [ $? -ne 0 ]; then
+        print_message "スナップショットリストの取得に失敗しました"
+        return 1
+    fi
+    
     local total_snapshots=$(echo "$snapshots_list" | wc -l)
     
     verbose_message "合計スナップショット数: $total_snapshots"
@@ -299,78 +323,41 @@ cleanup_old_snapshots() {
     
     local actually_deleted=0
     
-    if [ "$DRY_RUN" -eq 0 ]; then
-        local old_IFS="$IFS"
-        IFS=$'\n'
-        for snapshot in $snapshots_to_delete; do
-            verbose_message "処理中のスナップショット: $snapshot"
-            local delete_cmd="zfs destroy $snapshot"
-            verbose_message "実行コマンド: $delete_cmd"
-# cleanup_old_snapshots 関数内の修正後の部分
-if execute_command "$cmd_prefix $delete_cmd"; then
-    verbose_message "スナップショット $snapshot を削除しました。"
-    actually_deleted=$((actually_deleted + 1))
-else
-    print_message "エラー: スナップショット $snapshot の削除に失敗しました。"
-fi
-            verbose_message "現在の削除数: $actually_deleted"
-        done
-        IFS="$old_IFS"
-    else
-        verbose_message "ドライランモード: 以下のコマンドが実行されます。"
-        echo "$snapshots_to_delete" | while read -r snapshot; do
-            verbose_message "$ $cmd_prefix zfs destroy $snapshot"
-        done
-        actually_deleted=$delete_count
-    fi
+    local old_IFS="$IFS"
+    IFS=$'\n'
+    for snapshot in $snapshots_to_delete; do
+        verbose_message "処理中のスナップショット: $snapshot"
+        local delete_cmd="zfs destroy $snapshot"
+        
+        if [ "$type" = "source" ]; then
+            execute_command_with_error "$delete_cmd" ""
+        else
+            execute_command_with_error "" "$delete_cmd"
+        fi
+        
+        if [ $? -eq 0 ]; then
+            verbose_message "スナップショット $snapshot を削除しました。"
+            actually_deleted=$((actually_deleted + 1))
+        else
+            print_message "エラー: スナップショット $snapshot の削除に失敗しました。"
+        fi
+    done
+    IFS="$old_IFS"
     
     verbose_message "削除処理が完了しました。削除されたスナップショット数: $actually_deleted"
 }
 
-# スナップショットのリストを取得する関数
-get_snapshots_list() {
-    local dataset="$1"
-    local prefix="$2"
-    local cmd_prefix="$3"
-    
-    local cmd="zfs list -t snapshot -H -o name -s creation | grep '${dataset}@${prefix}' | sort"
-    
-    verbose_message "スナップショットリスト取得コマンド: $cmd_prefix $cmd"
-    
-    local result
-    if [ -n "$cmd_prefix" ]; then
-        result=$($cmd_prefix "$cmd")
-    else
-        result=$(eval "$cmd")
-    fi
-    
-    echo "$result"
-}
-
-# 暫定　cleanup　only
-execute_command() {
-    local full_cmd="$1"
-    
-    verbose_message "execute_command: full_cmd='$full_cmd'"
-    
-    if [ -n "$full_cmd" ]; then
-        eval "$full_cmd"
-    else
-        return 1
-    fi
-    return $?
-}
-
+# perfom_cleanup 関数も修正
 perfom_cleanup() {
-        print_message "古いスナップショットの削除を開始します。"
-        
-        verbose_message "ソース側のクリーンアップを開始"
-        cleanup_old_snapshots "$SOURCE_DATASET" "$SOURCE_PREFIX" "$SOURCE_CMD"
-        
-        verbose_message "デスティネーション側のクリーンアップを開始"
-        cleanup_old_snapshots "$DESTINATION_DATASET" "$DESTINATION_PREFIX" "$DESTINATION_CMD"
-        
-        print_message "古いスナップショットの削除が完了しました。"
+    print_message "古いスナップショットの削除を開始します。"
+    
+    verbose_message "ソース側のクリーンアップを開始"
+    cleanup_old_snapshots "$SOURCE_DATASET" "$SOURCE_PREFIX" "source"
+    
+    verbose_message "デスティネーション側のクリーンアップを開始"
+    cleanup_old_snapshots "$DESTINATION_DATASET" "$DESTINATION_PREFIX" "destination"
+    
+    print_message "古いスナップショットの削除が完了しました。"
 }
 
 # エラー報告関数
