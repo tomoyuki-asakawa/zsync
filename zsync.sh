@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION="2.2"
+VERSION="2.3"
 
 # グローバル変数の初期化
 USE_MBUFFER=0
@@ -141,10 +141,14 @@ process_arguments() {
     check_remote_host
 
     # 通知
-    if [ "$IS_REMOTE_SOURCE" -eq 0 ] && [ -n "$SOURCE_SSH" ]; then
+    if [ "$IS_REMOTE_SOURCE" -eq 1 ]; then
+        echo "Notice: Source is on remote host $SOURCE_SSH."
+    else
         echo "Notice: Source is on the local host."
     fi
-    if [ "$IS_REMOTE_DESTINATION" -eq 0 ] && [ -n "$DESTINATION_SSH" ]; then
+    if [ "$IS_REMOTE_DESTINATION" -eq 1 ]; then
+        echo "Notice: Destination is on remote host $DESTINATION_SSH."
+    else
         echo "Notice: Destination is on the local host."
     fi
 }
@@ -250,20 +254,10 @@ get_send_resume_token() {
     fi
 }
 
-# 受信側の再開トークンの取得
-get_receive_resume_token() {
-    if [ "$IS_REMOTE_DESTINATION" -eq 1 ]; then
-        ssh "$DESTINATION_SSH" "zfs get -H -o value receive_resume_token $DESTINATION_DATASET" 2>/dev/null || true
-    else
-        zfs get -H -o value receive_resume_token "$DESTINATION_DATASET" 2>/dev/null || true
-    fi
-}
-
 # 再開トークンを使用した転送の再開
 resume_transfer() {
     local send_resume_token="$1"
-    local receive_resume_token="$2"
-    echo "Resuming transfer using send_resume_token: $send_resume_token and receive_resume_token: $receive_resume_token"
+    echo "Resuming transfer using send_resume_token: $send_resume_token"
 
     if [ "$IS_REMOTE_SOURCE" -eq 1 ]; then
         ssh "$SOURCE_SSH" "sudo zfs send $ZFS_SEND_OPTION -t $send_resume_token" | $MBUFFER_CMD | \
@@ -294,15 +288,6 @@ full_transfer() {
         else
             sudo zfs receive -F "$DESTINATION_DATASET"
         fi
-    else
-        echo "Performing initial full send of $SOURCE_DATASET@$latest_snapshot to destination"
-        sudo zfs send $ZFS_SEND_OPTION "$SOURCE_DATASET@$latest_snapshot" | $MBUFFER_CMD | \
-        if [ "$IS_REMOTE_DESTINATION" -eq 1 ]; then
-            ssh "$DESTINATION_SSH" "$MBUFFER_CMD | sudo zfs receive -F $DESTINATION_DATASET"
-        else
-            sudo zfs receive -F "$DESTINATION_DATASET"
-        fi
-    fi
 }
 
 # インクリメンタル転送
@@ -346,31 +331,22 @@ cleanup_snapshots() {
     else
         sudo zfs destroy "$SOURCE_DATASET@$previous_snapshot" 2>/dev/null || true
     fi
-
-    if [ "$IS_REMOTE_DESTINATION" -eq 1 ]; then
-        ssh "$DESTINATION_SSH" "sudo zfs destroy $DESTINATION_DATASET@$previous_snapshot" 2>/dev/null || true
-    else
-        sudo zfs destroy "$DESTINATION_DATASET@$previous_snapshot" 2>/dev/null || true
-    fi
 }
 
 # 転送処理の実行
 perform_transfer() {
     local latest_snapshot="$1"
     local send_resume_token
-    local receive_resume_token
 
-    # 最新のスナップショット名をグローバル変数として設定
-    LATEST_SNAPSHOT="$latest_snapshot"
-
-    # 送信側と受信側の再開トークンを取得
+    # 送信側の再開トークンを取得
     send_resume_token=$(get_send_resume_token)
-    receive_resume_token=$(get_receive_resume_token)
 
-    if [ -n "$send_resume_token" ] && [ "$send_resume_token" != "-" ] && [ -n "$receive_resume_token" ] && [ "$receive_resume_token" != "-" ]; then
+    if [ -n "$send_resume_token" ] && [ "$send_resume_token" != "-" ]; then
         echo "Resuming previous transfer."
-        resume_transfer "$send_resume_token" "$receive_resume_token"
+        resume_transfer "$send_resume_token"
     else
+        # 新しいスナップショットを作成
+        latest_snapshot=$(create_source_snapshot)
         local previous_snapshot=$(get_latest_destination_snapshot)
         if [ -z "$previous_snapshot" ]; then
             echo "No previous snapshot found. Performing full transfer."
@@ -399,23 +375,8 @@ main() {
         echo "  Destination: Local $DESTINATION_DATASET"
     fi
 
-    # スナップショットを作成
-    latest_snapshot=$(create_source_snapshot)
-
-    # 同じプール内でのローカル転送かどうかを確認
-    if [ "$IS_REMOTE_SOURCE" -eq 0 ] && [ "$IS_REMOTE_DESTINATION" -eq 0 ]; then
-        SOURCE_POOL=$(get_pool_name "$SOURCE_DATASET")
-        DESTINATION_POOL=$(get_pool_name "$DESTINATION_DATASET")
-
-        if [ "$SOURCE_POOL" = "$DESTINATION_POOL" ]; then
-            echo "同じプール内でのローカル転送が検出されました。"
-            clone_and_promote "$latest_snapshot"
-        else
-            perform_transfer "$latest_snapshot"
-        fi
-    else
-        perform_transfer "$latest_snapshot"
-    fi
+    # 転送処理の実行
+    perform_transfer
 }
 
 # メイン処理の実行
