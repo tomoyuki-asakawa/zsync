@@ -4,7 +4,7 @@
 # このスクリプトは FreeBSD の sh、macOS の zsh、および bash との互換性があります。
 
 # グローバル変数
-VERSION="5.42"
+VERSION="5.43"
 SOURCE_SSH=""
 SOURCE_DATASET=""
 DESTINATION_SSH=""
@@ -442,7 +442,7 @@ show_snapshot_diff() {
 
     local diff_output=$(execute_command_with_error "$diff_cmd" "")
     
-    if [ -z "$diff_output" ];then
+    if [ -z "$diff_output" ]; then
         if [ "$silent" -eq 0 ]; then
             print_message "差分がありません。転送をスキップします。"
         fi
@@ -453,6 +453,13 @@ show_snapshot_diff() {
         echo "$diff_output"
     fi
     return 0  # 差分があった場合は成功を示す
+}
+
+# スナップショットを削除する関数
+delete_snapshot() {
+    local snapshot_name="$1"
+    verbose_message "スナップショットを削除します: $snapshot_name"
+    execute_command_with_error "zfs destroy $snapshot_name" ""
 }
 
 # 引数をパースし、設定を更新する関数
@@ -554,12 +561,16 @@ main() {
                 # -D オプションがある場合は差分を表示し、なければサイレントに実行
                 if [ "$SHOW_DIFF_FILES" -eq 1 ]; then
                     if ! show_snapshot_diff "$previous_snapshot" "$current_snapshot" 0; then
-                        verbose_message "差分がないため、インクリメンタルセンドをスキップします。"
+                        verbose_message "差分がないため、インクリメンタルセンドをスキップし、スナップショットを削除します。"
+                        # スナップショットの削除
+                        delete_snapshot "${SOURCE_DATASET}@${current_snapshot}"
                         return 0
                     fi
                 else
                     if ! show_snapshot_diff "$previous_snapshot" "$current_snapshot" 1; then
-                        verbose_message "差分がないため、インクリメンタルセンドをスキップします。"
+                        verbose_message "差分がないため、インクリメンタルセンドをスキップし、スナップショットを削除します。"
+                        # スナップショットの削除
+                        delete_snapshot "${SOURCE_DATASET}@${current_snapshot}"
                         return 0
                     fi
                 fi
