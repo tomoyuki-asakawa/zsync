@@ -4,7 +4,7 @@
 # このスクリプトは FreeBSD の sh、macOS の zsh、および bash との互換性があります。
 
 # グローバル変数
-VERSION="5.43"
+VERSION="5.44"
 SOURCE_SSH=""
 SOURCE_DATASET=""
 DESTINATION_SSH=""
@@ -455,12 +455,20 @@ show_snapshot_diff() {
     return 0  # 差分があった場合は成功を示す
 }
 
-# スナップショットを削除する関数
-delete_snapshot() {
+# ソースのスナップショットを削除する関数
+delete_source_snapshot() {
     local snapshot_name="$1"
-    verbose_message "スナップショットを削除します: $snapshot_name"
+    verbose_message "ソースのスナップショットを削除します: $snapshot_name"
     execute_command_with_error "zfs destroy $snapshot_name" ""
 }
+
+# ディスティネーションのスナップショットを削除する関数
+delete_destination_snapshot() {
+    local snapshot_name="$1"
+    verbose_message "ディスティネーションのスナップショットを削除します: $snapshot_name"
+    execute_command_with_error "" "zfs destroy $snapshot_name"
+}
+
 
 # 引数をパースし、設定を更新する関数
 parse_arguments() {
@@ -558,25 +566,21 @@ main() {
 
                 local previous_snapshot=$(get_latest_snapshot)
                 
-                # -D オプションがある場合は差分を表示し、なければサイレントに実行
-                if [ "$SHOW_DIFF_FILES" -eq 1 ]; then
-                    if ! show_snapshot_diff "$previous_snapshot" "$current_snapshot" 0; then
-                        verbose_message "差分がないため、インクリメンタルセンドをスキップし、スナップショットを削除します。"
-                        # スナップショットの削除
-                        delete_snapshot "${SOURCE_DATASET}@${current_snapshot}"
-                        return 0
-                    fi
-                else
-                    if ! show_snapshot_diff "$previous_snapshot" "$current_snapshot" 1; then
-                        verbose_message "差分がないため、インクリメンタルセンドをスキップし、スナップショットを削除します。"
-                        # スナップショットの削除
-                        delete_snapshot "${SOURCE_DATASET}@${current_snapshot}"
-                        return 0
-                    fi
+                # SHOW_DIFF_FILES の値に応じて差分表示またはサイレント実行
+                if ! show_snapshot_diff "$previous_snapshot" "$current_snapshot" "$SHOW_DIFF_FILES"; then
+                    verbose_message "差分がないため、インクリメンタルセンドをスキップし、スナップショットを削除します。"
+                    # ソース側のスナップショットを削除
+                    delete_source_snapshot "${SOURCE_DATASET}@${current_snapshot}"
+                    return 0
                 fi
 
                 verbose_message "インクリメンタルセンドを実行します。"
                 perform_incremental_send "$corresponding_source" "$current_snapshot"
+                
+                # インクリメンタルセンド後に previous_snapshot をソースとディスティネーション両方で削除
+                verbose_message "インクリメンタルセンドが成功したため、前のスナップショットを削除します: ${previous_snapshot}"
+                delete_source_snapshot "${SOURCE_DATASET}@${previous_snapshot}"
+                delete_destination_snapshot "${DESTINATION_DATASET}@${previous_snapshot}"  # ディスティネーション側の削除
             fi
         fi
     fi
@@ -592,6 +596,7 @@ main() {
         print_message "ZSync操作が完了しました。"
     fi
 }
+
 
 # スクリプトの実行
 main "$@"
