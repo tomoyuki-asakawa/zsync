@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION="2.5"
+VERSION="2.8"
 
 # グローバル変数の初期化
 USE_MBUFFER=0
@@ -203,7 +203,7 @@ check_destination_pool() {
     fi
 }
 
-# クローンとプロモートを実行する関数
+# クローンとプロモートを実行する関数（ローカル転送用）
 clone_and_promote() {
     local latest_snapshot="$1"
     local clone_name="$DESTINATION_DATASET"
@@ -261,29 +261,29 @@ get_latest_destination_snapshot() {
     fi
 }
 
-# 送信側の再開トークンの取得
-get_latest_send_resume_token() {
-    if [ "$IS_REMOTE_SOURCE" -eq 1 ]; then
-        ssh "$SOURCE_SSH" "zfs list -t snapshot -H -o name,send_resume_token $SOURCE_DATASET" 2>/dev/null | awk '$2 != "-" {print $2 " " $1}' | sort | tail -1 | cut -d' ' -f1
+# レジュームトークンの取得（受信側から取得）
+get_resume_token() {
+    if [ "$IS_REMOTE_DESTINATION" -eq 1 ]; then
+        ssh "$DESTINATION_SSH" "zfs get -H -o value receive_resume_token $DESTINATION_DATASET@$LATEST_SNAPSHOT" 2>/dev/null || true
     else
-        zfs list -t snapshot -H -o name,send_resume_token "$SOURCE_DATASET" 2>/dev/null | awk '$2 != "-" {print $2 " " $1}' | sort | tail -1 | cut -d' ' -f1
+        zfs get -H -o value receive_resume_token "$DESTINATION_DATASET@$LATEST_SNAPSHOT" 2>/dev/null || true
     fi
 }
 
-# 再開トークンを使用した転送の再開
+# レジュームトークンを使用した転送の再開
 resume_transfer() {
-    local send_resume_token="$1"
-    echo "Resuming transfer using send_resume_token: $send_resume_token"
+    local resume_token="$1"
+    echo "Resuming transfer using resume_token: $resume_token"
 
     if [ "$IS_REMOTE_SOURCE" -eq 1 ]; then
-        ssh "$SOURCE_SSH" "sudo zfs send $ZFS_SEND_OPTION -t $send_resume_token" | $MBUFFER_CMD | \
+        ssh "$SOURCE_SSH" "sudo zfs send $ZFS_SEND_OPTION -t $resume_token" | $MBUFFER_CMD | \
         if [ "$IS_REMOTE_DESTINATION" -eq 1 ]; then
             ssh "$DESTINATION_SSH" "$MBUFFER_CMD | sudo zfs receive -F $DESTINATION_DATASET"
         else
             sudo zfs receive -F "$DESTINATION_DATASET"
         fi
     else
-        sudo zfs send $ZFS_SEND_OPTION -t "$send_resume_token" | $MBUFFER_CMD | \
+        sudo zfs send $ZFS_SEND_OPTION -t "$resume_token" | $MBUFFER_CMD | \
         if [ "$IS_REMOTE_DESTINATION" -eq 1 ]; then
             ssh "$DESTINATION_SSH" "$MBUFFER_CMD | sudo zfs receive -F $DESTINATION_DATASET"
         else
@@ -304,15 +304,6 @@ full_transfer() {
         else
             sudo zfs receive -F "$DESTINATION_DATASET"
         fi
-    else
-        echo "Performing initial full send of $SOURCE_DATASET@$latest_snapshot to destination"
-        sudo zfs send $ZFS_SEND_OPTION "$SOURCE_DATASET@$latest_snapshot" | $MBUFFER_CMD | \
-        if [ "$IS_REMOTE_DESTINATION" -eq 1 ]; then
-            ssh "$DESTINATION_SSH" "$MBUFFER_CMD | sudo zfs receive -F $DESTINATION_DATASET"
-        else
-            sudo zfs receive -F "$DESTINATION_DATASET"
-        fi
-    fi
 }
 
 # インクリメンタル転送
@@ -366,36 +357,33 @@ cleanup_snapshots() {
 
 # 転送処理の実行
 perform_transfer() {
-    local send_resume_token
+    local latest_snapshot
+    local previous_snapshot
+    local resume_token
 
-    # 送信側の再開トークンを取得（最新のものを取得）
-    send_resume_token=$(get_latest_send_resume_token)
+    # 最新のデスティネーションスナップショットを取得
+    previous_snapshot=$(get_latest_destination_snapshot)
 
-    if [ -n "$send_resume_token" ] && [ "$send_resume_token" != "-" ]; then
-        echo "Resuming previous transfer."
-        resume_transfer "$send_resume_token"
-    else
-        # 新しいスナップショットを作成
-        latest_snapshot=$(create_source_snapshot)
-        local previous_snapshot=$(get_latest_destination_snapshot)
-        if [ -z "$previous_snapshot" ]; then
-            echo "No previous snapshot found. Performing full transfer."
-            full_transfer "$latest_snapshot"
+    if [ -n "$previous_snapshot" ]; then
+        # デスティネーションにスナップショットが存在する場合、レジュームトークンを取得
+        LATEST_SNAPSHOT=$(echo "$previous_snapshot" | awk -F@ '{print $2}')
+        resume_token=$(get_resume_token)
+
+        if [ -n "$resume_token" ] && [ "$resume_token" != "-" ]; then
+            echo "Found resume_token: $resume_token. Attempting to resume transfer."
+            resume_transfer "$resume_token"
+            exit 0
         else
-            echo "Previous snapshot found. Performing incremental transfer."
+            echo "No valid resume_token found. Performing incremental transfer."
+            # 新しいスナップショットを作成
+            latest_snapshot=$(create_source_snapshot)
             incremental_transfer "$previous_snapshot" "$latest_snapshot"
         fi
-    fi
-}
-
-# 最新の再開トークンを持つスナップショットを取得する関数
-get_latest_send_resume_token() {
-    if [ "$IS_REMOTE_SOURCE" -eq 1 ]; then
-        ssh "$SOURCE_SSH" "zfs list -t snapshot -H -o name,send_resume_token $SOURCE_DATASET" 2>/dev/null | \
-            awk '$2 != "-" {print $2 " " $1}' | sort | tail -1 | cut -d' ' -f1
     else
-        zfs list -t snapshot -H -o name,send_resume_token "$SOURCE_DATASET" 2>/dev/null | \
-            awk '$2 != "-" {print $2 " " $1}' | sort | tail -1 | cut -d' ' -f1
+        echo "No previous snapshot found. Performing full transfer."
+        # 新しいスナップショットを作成
+        latest_snapshot=$(create_source_snapshot)
+        full_transfer "$latest_snapshot"
     fi
 }
 
