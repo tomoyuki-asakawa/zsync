@@ -4,7 +4,7 @@
 # このスクリプトは FreeBSD の sh、macOS の zsh、および bash との互換性があります。
 
 # グローバル変数
-VERSION="5.38"
+VERSION="5.4"
 SOURCE_SSH=""
 SOURCE_DATASET=""
 DESTINATION_SSH=""
@@ -247,26 +247,26 @@ perform_full_send() {
 # インクリメンタルセンドを実行する関数
 perform_incremental_send() {
     local base_snapshot="$1"
+    local current_snapshot="$2"  # 新しいスナップショットを引数として受け取る
+
+    if [ -z "$current_snapshot" ]; then
+        print_message "エラー: 新しいスナップショットが提供されていません。"
+        return 1
+    fi
+
     local base_dataset=$(echo "$base_snapshot" | cut -d'@' -f1)
     local base_snapshot_name=$(echo "$base_snapshot" | cut -d'@' -f2)
 
-    local new_snapshot=$(create_snapshot)
-    if [ -n "$new_snapshot" ]; then
-        verbose_message "新しいスナップショットを作成しました: $new_snapshot"
-        verbose_message "インクリメンタルセンドを実行: $base_snapshot から ${SOURCE_DATASET}@${new_snapshot} へ"
-        
-        local send_cmd="zfs send"
-        if [ "$VERBOSE" -eq 1 ]; then
-            send_cmd="$send_cmd -v"
-        fi
-        send_cmd="$send_cmd -i ${base_dataset}@${base_snapshot_name} ${SOURCE_DATASET}@${new_snapshot}"
-        local receive_cmd="zfs receive -F ${DESTINATION_DATASET}"
-        
-        execute_zfs_send_receive "$send_cmd" "$receive_cmd"
-    else
-        print_message "エラー: 新しいスナップショットの作成に失敗しました。"
-        return 1
+    verbose_message "インクリメンタルセンドを実行: $base_snapshot から ${SOURCE_DATASET}@${current_snapshot} へ"
+    
+    local send_cmd="zfs send"
+    if [ "$VERBOSE" -eq 1 ]; then
+        send_cmd="$send_cmd -v"
     fi
+    send_cmd="$send_cmd -i ${base_dataset}@${base_snapshot_name} ${SOURCE_DATASET}@${current_snapshot}"
+    local receive_cmd="zfs receive -F ${DESTINATION_DATASET}"
+    
+    execute_zfs_send_receive "$send_cmd" "$receive_cmd"
 }
 
 # 古いスナップショットを削除する関数
@@ -529,7 +529,7 @@ main() {
 
     local resume_token=$(get_resume_token)
     
-    if [ -n "$resume_token" ]; then
+    if [ -n "$resume_token" ];then
         verbose_message "レジュームトークンを使用して転送を再開します。"
         resume_transfer "$resume_token"
     else
@@ -552,14 +552,16 @@ main() {
             else
                 verbose_message "対応するソーススナップショットが見つかりました: $corresponding_source"
                 
+                # 新しいスナップショットを一度だけ作成
+                local current_snapshot=$(create_snapshot)
+                
                 if [ "$SHOW_DIFF_FILES" -eq 1 ]; then
                     local previous_snapshot=$(get_latest_snapshot)
-                    local current_snapshot=$(create_snapshot)
                     show_snapshot_diff "$previous_snapshot" "$current_snapshot"
                 fi
 
                 verbose_message "インクリメンタルセンドを実行します。"
-                perform_incremental_send "$corresponding_source"
+                perform_incremental_send "$corresponding_source" "$current_snapshot"
             fi
         fi
     fi
