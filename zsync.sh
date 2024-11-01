@@ -4,7 +4,7 @@
 # このスクリプトは FreeBSD の sh、macOS の zsh、および bash との互換性があります。
 
 # グローバル変数
-VERSION="5.34"
+VERSION="5.35"
 SOURCE_SSH=""
 SOURCE_DATASET=""
 DESTINATION_SSH=""
@@ -423,6 +423,44 @@ resume_transfer() {
     fi
 }
 
+# 差分の有無チェック関数
+check_snapshot_diff() {
+    local previous_snapshot="$1"
+    local current_snapshot="$2"
+    
+    if [ -z "$previous_snapshot" ] || [ -z "$current_snapshot" ]; then
+        print_message "エラー: 差分を表示するために両方のスナップショットが必要です。"
+        return 1
+    fi
+    
+    local diff_cmd="zfs diff -H ${SOURCE_DATASET}@${previous_snapshot} ${SOURCE_DATASET}@${current_snapshot}"
+    verbose_message "差分を表示するコマンド: $diff_cmd"
+    
+    local diff_output=$(execute_command_with_error "$diff_cmd" "")
+    if [ -z "$diff_output" ]; then
+        print_message "差分がありません。転送をスキップします。"
+#        delete_snapshot "${SOURCE_DATASET}@${current_snapshot}" "$SOURCE_CMD"
+        return 0
+    fi
+    return 1
+}
+
+# 差分ファイルを表示する関数
+show_snapshot_diff() {
+    local previous_snapshot="$1"
+    local current_snapshot="$2"
+    
+    if [ -z "$previous_snapshot" ] || [ -z "$current_snapshot" ]; then
+        print_message "エラー: 差分を表示するために両方のスナップショットが必要です。"
+        return 1
+    fi
+    
+    local diff_cmd="zfs diff ${SOURCE_DATASET}@${previous_snapshot} ${SOURCE_DATASET}@${current_snapshot}"
+    verbose_message "差分を表示するコマンド: $diff_cmd"
+    
+    execute_command_with_error "$diff_cmd" ""
+}
+
 # 引数をパースし、設定を更新する関数
 parse_arguments() {
     while getopts "fs:d:IVvCk:Dni" opt; do
@@ -513,6 +551,13 @@ main() {
                 perform_full_send
             else
                 verbose_message "対応するソーススナップショットが見つかりました: $corresponding_source"
+                
+                if [ "$SHOW_DIFF_FILES" -eq 1 ]; then
+                    local previous_snapshot=$(get_latest_snapshot)
+                    local current_snapshot=$(create_snapshot)
+                    show_snapshot_diff "$previous_snapshot" "$current_snapshot"
+                fi
+
                 verbose_message "インクリメンタルセンドを実行します。"
                 perform_incremental_send "$corresponding_source"
             fi
