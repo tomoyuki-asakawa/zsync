@@ -423,8 +423,8 @@ resume_transfer() {
     fi
 }
 
-# 差分の有無チェック関数
-check_snapshot_diff() {
+# 差分ファイルを表示し、差分がなければ false を返す関数
+show_snapshot_diff() {
     local previous_snapshot="$1"
     local current_snapshot="$2"
     
@@ -437,28 +437,14 @@ check_snapshot_diff() {
     verbose_message "差分を表示するコマンド: $diff_cmd"
     
     local diff_output=$(execute_command_with_error "$diff_cmd" "")
+    
     if [ -z "$diff_output" ]; then
         print_message "差分がありません。転送をスキップします。"
-#        delete_snapshot "${SOURCE_DATASET}@${current_snapshot}" "$SOURCE_CMD"
-        return 0
-    fi
-    return 1
-}
-
-# 差分ファイルを表示する関数
-show_snapshot_diff() {
-    local previous_snapshot="$1"
-    local current_snapshot="$2"
-    
-    if [ -z "$previous_snapshot" ] || [ -z "$current_snapshot" ]; then
-        print_message "エラー: 差分を表示するために両方のスナップショットが必要です。"
-        return 1
+        return 1  # 差分がない場合はエラーコード 1 を返す
     fi
     
-    local diff_cmd="zfs diff ${SOURCE_DATASET}@${previous_snapshot} ${SOURCE_DATASET}@${current_snapshot}"
-    verbose_message "差分を表示するコマンド: $diff_cmd"
-    
-    execute_command_with_error "$diff_cmd" ""
+    echo "$diff_output"
+    return 0  # 差分があった場合は成功を示す
 }
 
 # 引数をパースし、設定を更新する関数
@@ -529,7 +515,7 @@ main() {
 
     local resume_token=$(get_resume_token)
     
-    if [ -n "$resume_token" ];then
+    if [ -n "$resume_token" ]; then
         verbose_message "レジュームトークンを使用して転送を再開します。"
         resume_transfer "$resume_token"
     else
@@ -557,7 +543,12 @@ main() {
                 
                 if [ "$SHOW_DIFF_FILES" -eq 1 ]; then
                     local previous_snapshot=$(get_latest_snapshot)
-                    show_snapshot_diff "$previous_snapshot" "$current_snapshot"
+                    
+                    # 差分がない場合はインクリメンタルセンドをスキップ
+                    if ! show_snapshot_diff "$previous_snapshot" "$current_snapshot"; then
+                        verbose_message "差分がないため、インクリメンタルセンドをスキップします。"
+                        return 0
+                    fi
                 fi
 
                 verbose_message "インクリメンタルセンドを実行します。"
