@@ -4,7 +4,7 @@
 # このスクリプトは FreeBSD の sh、macOS の zsh、および bash との互換性があります。
 
 # グローバル変数
-VERSION="5.44"
+VERSION="5.45"
 SOURCE_SSH=""
 SOURCE_DATASET=""
 DESTINATION_SSH=""
@@ -63,24 +63,26 @@ execute_command_with_error() {
     
     verbose_message "実行するコマンド: $full_cmd"
     
-    if [ "$DRY_RUN" -eq 0 ]; then
-        eval "$full_cmd"
-        local exit_code=$?
-        if [ $exit_code -ne 0 ]; then
-            print_message "エラー: コマンド実行が失敗しました。終了コード: $exit_code"
-            return $exit_code
-        fi
-    else
-        print_message "ドライラン: 以下のコマンドを実行します: $full_cmd"
+    eval "$full_cmd"
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        print_message "エラー: コマンド実行が失敗しました。終了コード: $exit_code"
+        return $exit_code
     fi
 }
 
-# ZFS send/receive を実行する関数
 execute_zfs_send_receive() {
     local send_cmd="$1"
     local receive_cmd="$2"
     
-    execute_command_with_error "$send_cmd" "$receive_cmd"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        verbose_message "ドライラン: ZFS send/receive を実行します"
+        verbose_message "送信コマンド: $send_cmd"
+        verbose_message "受信コマンド: $receive_cmd (-> /dev/null)"
+        execute_command_with_error "$send_cmd" "cat > /dev/null"
+    else
+        execute_command_with_error "$send_cmd" "$receive_cmd"
+    fi
 }
 
 # ホスト識別子を取得する関数
@@ -423,36 +425,35 @@ resume_transfer() {
     fi
 }
 
-# 差分を表示し、差分がなければ false を返す関数
-show_snapshot_diff() {
+# 差分がなければ false を返す関数 オプションで　差分を表示。
+check_snapshot_diff() {
     local previous_snapshot="$1"
     local current_snapshot="$2"
-    local silent="$3"  # サイレントモードかどうかのフラグ
+    local show_diff="$3"  # 差分表示オプション
 
     if [ -z "$previous_snapshot" ] || [ -z "$current_snapshot" ]; then
-        print_message "エラー: 差分を表示するために両方のスナップショットが必要です。"
+        print_message "エラー: 差分チェックのために両方のスナップショットが必要です。"
         return 1
     fi
     
     local diff_cmd="zfs diff -H ${SOURCE_DATASET}@${previous_snapshot} ${SOURCE_DATASET}@${current_snapshot}"
-    
-    if [ "$silent" -eq 0 ]; then
-        verbose_message "差分を表示するコマンド: $diff_cmd"
-    fi
+    verbose_message "差分チェックコマンド: $diff_cmd"
 
     local diff_output=$(execute_command_with_error "$diff_cmd" "")
+    local has_diff=0
     
     if [ -z "$diff_output" ]; then
-        if [ "$silent" -eq 0 ]; then
-            print_message "差分がありません。転送をスキップします。"
+        verbose_message "差分はありません"
+        has_diff=1
+    else
+        verbose_message "差分が検出されました"
+        if [ "$show_diff" -eq 1 ]; then
+            print_message "検出された差分:"
+            echo "$diff_output"
         fi
-        return 1  # 差分がない場合はエラーコード 1 を返す
     fi
     
-    if [ "$silent" -eq 0 ]; then
-        echo "$diff_output"
-    fi
-    return 0  # 差分があった場合は成功を示す
+    return $has_diff
 }
 
 # ソースのスナップショットを削除する関数
@@ -566,10 +567,10 @@ main() {
 
                 local previous_snapshot=$(get_latest_snapshot)
                 
-                # SHOW_DIFF_FILES の値に応じて差分表示またはサイレント実行
-                if ! show_snapshot_diff "$previous_snapshot" "$current_snapshot" "$SHOW_DIFF_FILES"; then
+                # SHOW_DIFF_FILES の値に応じて差分表示
+                if ! check_snapshot_diff "$previous_snapshot" "$current_snapshot" "$SHOW_DIFF_FILES"; then
                     verbose_message "差分がないため、インクリメンタルセンドをスキップし、スナップショットを削除します。"
-                    # ソース側のスナップショットを削除
+                    # 差分がない場合は常に　ソース側の current_snapshot　を削除
                     delete_source_snapshot "${SOURCE_DATASET}@${current_snapshot}"
                     return 0
                 fi
@@ -577,10 +578,17 @@ main() {
                 verbose_message "インクリメンタルセンドを実行します。"
                 perform_incremental_send "$corresponding_source" "$current_snapshot"
                 
-                # インクリメンタルセンド後に previous_snapshot をソースとディスティネーション両方で削除
-                verbose_message "インクリメンタルセンドが成功したため、前のスナップショットを削除します: ${previous_snapshot}"
-                delete_source_snapshot "${SOURCE_DATASET}@${previous_snapshot}"
-                delete_destination_snapshot "${DESTINATION_DATASET}@${previous_snapshot}"  # ディスティネーション側の削除
+                # スナップショットの削除処理
+                if [ "$DRY_RUN" -eq 1 ]; then
+                    # ドライラン時は転送をシミュレートしただけなので、新しく作ったスナップショットを削除
+                    verbose_message "ドライラン: 新しいスナップショットを削除します: ${current_snapshot}"
+                    delete_source_snapshot "${SOURCE_DATASET}@${current_snapshot}"
+                else
+                    # 実際の転送時は前のスナップショットを両側で削除
+                    verbose_message "インクリメンタルセンドが成功したため、前のスナップショットを削除します: ${previous_snapshot}"
+                    delete_source_snapshot "${SOURCE_DATASET}@${previous_snapshot}"
+                    delete_destination_snapshot "${DESTINATION_DATASET}@${previous_snapshot}"
+                fi
             fi
         fi
     fi
